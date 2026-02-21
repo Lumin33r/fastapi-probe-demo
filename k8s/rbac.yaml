@@ -1,0 +1,28 @@
+# RBAC — Allow pods to discover their peers via the Kubernetes API
+# ----------------------------------------------------------------
+# The default ServiceAccount in the namespace gets read access
+# to Endpoints and Pods, so the FastAPI app can list sibling pods
+# and display their IPs/status on the landing page.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-reader
+  namespace: fastapi-demo-troy
+rules:
+  - apiGroups: [""]
+    resources: ["endpoints", "pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: demo-pod-reader
+  namespace: fastapi-demo-troy
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: fastapi-demo-troy
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io

@@ -14,6 +14,23 @@ import os
 import socket
 import time
 import datetime
+import logging
+
+logger = logging.getLogger("uvicorn.error")
+
+# ---------------------------------------------------------------------------
+# Kubernetes API client — for peer pod discovery
+# ---------------------------------------------------------------------------
+try:
+    from kubernetes import client, config
+    config.load_incluster_config()
+    k8s_v1 = client.CoreV1Api()
+    K8S_AVAILABLE = True
+    logger.info("Kubernetes in-cluster config loaded — peer discovery enabled")
+except Exception:
+    k8s_v1 = None
+    K8S_AVAILABLE = False
+    logger.warning("Kubernetes client not available — peer discovery disabled")
 
 # ---------------------------------------------------------------------------
 # App state — simulates real-world readiness conditions
@@ -32,6 +49,103 @@ app = FastAPI(
     description="Generic FastAPI image for learning Kubernetes probes & operations",
     version=APP_VERSION,
 )
+
+
+# ---------------------------------------------------------------------------
+# Peer discovery — list sibling pods via the Kubernetes API
+# ---------------------------------------------------------------------------
+SERVICE_NAME = os.getenv("SERVICE_NAME", "demo-service")
+
+def get_peer_pods():
+    """
+    Query the Kubernetes API for all pods in this Deployment.
+    Returns a list of dicts: [{name, ip, node, ready, is_self}, ...]
+    Falls back to an empty list if the K8s client isn't available.
+    """
+    if not K8S_AVAILABLE:
+        return []
+    try:
+        pods = k8s_v1.list_namespaced_pod(
+            namespace=NAMESPACE,
+            label_selector="app=demo",
+        )
+        my_ip = socket.gethostbyname(socket.gethostname())
+        peers = []
+        for pod in pods.items:
+            pod_ip = pod.status.pod_ip or "pending"
+            ready = False
+            if pod.status.conditions:
+                for cond in pod.status.conditions:
+                    if cond.type == "Ready" and cond.status == "True":
+                        ready = True
+            peers.append({
+                "name": pod.metadata.name,
+                "ip": pod_ip,
+                "node": pod.spec.node_name or "unknown",
+                "phase": pod.status.phase,
+                "ready": ready,
+                "restarts": sum(
+                    cs.restart_count for cs in (pod.status.container_statuses or [])
+                ),
+                "is_self": pod_ip == my_ip,
+            })
+        return sorted(peers, key=lambda p: p["name"])
+    except Exception as e:
+        logger.warning(f"Peer discovery failed: {e}")
+        return []
+
+
+def render_peer_table(peers):
+    """Render the peer pods table HTML with links to each pod's endpoints."""
+    if not peers:
+        return """
+<div class="card">
+  <h2>🔗 Peer Pods</h2>
+  <p><em>Peer discovery unavailable — RBAC or Kubernetes client not configured.</em></p>
+  <pre>
+# Apply RBAC to enable peer discovery:
+kubectl apply -f k8s/rbac.yaml
+  </pre>
+</div>"""
+
+    rows = ""
+    for p in peers:
+        badge = " <span class='tag'>← YOU</span>" if p["is_self"] else ""
+        ready_icon = "<span class='ok'>✓</span>" if p["ready"] else "<span class='fail'>✗</span>"
+        # Links to this pod's endpoints via direct pod IP (cluster-internal)
+        links = (
+            f'<a href="http://{p["ip"]}:8000/">home</a> · '
+            f'<a href="http://{p["ip"]}:8000/info">info</a> · '
+            f'<a href="http://{p["ip"]}:8000/healthz">healthz</a> · '
+            f'<a href="http://{p["ip"]}:8000/ready">ready</a> · '
+            f'<a href="http://{p["ip"]}:8000/toggle-health">toggle-health</a> · '
+            f'<a href="http://{p["ip"]}:8000/toggle-ready">toggle-ready</a>'
+        )
+        rows += f"""<tr>
+  <td><code>{p["name"]}</code>{badge}</td>
+  <td><code>{p["ip"]}</code></td>
+  <td><code>{p["node"]}</code></td>
+  <td>{ready_icon} {p["phase"]}</td>
+  <td>{p["restarts"]}</td>
+  <td style="font-size:0.85em">{links}</td>
+</tr>"""
+
+    return f"""
+<div class="card">
+  <h2>🔗 Peer Pods ({len(peers)} replicas)</h2>
+  <p>Live data from the Kubernetes API — each pod discovers its siblings via a ServiceAccount
+     with RBAC read access to Endpoints and Pods.</p>
+  <table>
+    <tr><th>Pod Name</th><th>IP</th><th>Node</th><th>Status</th><th>Restarts</th><th>Endpoints</th></tr>
+    {rows}
+  </table>
+  <p style="font-size:0.85em; color:#8b949e">
+    ⚠️ Pod-IP links only work from <strong>inside the cluster</strong> (or via port-forward to
+    a specific pod). From your local terminal, use:
+    <code>kubectl port-forward pod/&lt;name&gt; -n {NAMESPACE} 8080:8000</code>
+  </p>
+</div>"""
+
 
 # ---------------------------------------------------------------------------
 # CSS shared across all HTML pages
@@ -210,6 +324,8 @@ async def startup():
 async def index():
     """Landing page with navigation and educational overview."""
     uptime = round(time.time() - APP_START_TIME, 1)
+    peers = get_peer_pods()
+    peer_html = render_peer_table(peers)
     return HTMLResponse(content=f"""
 {STYLE}
 <h1>🚀 EKS Probe Demo — FastAPI</h1>
@@ -222,6 +338,8 @@ async def index():
   <p><strong>Hostname:</strong> <code>{socket.gethostname()}</code></p>
   <p><strong>IP:</strong> <code>{socket.gethostbyname(socket.gethostname())}</code></p>
 </div>
+
+{peer_html}
 
 <h2>📡 Probe Endpoints</h2>
 <table>
@@ -279,6 +397,8 @@ kubectl port-forward pod/{POD_NAME} -n {NAMESPACE} 8080:8000
 async def info():
     """Detailed pod metadata and environment information."""
     uptime = round(time.time() - APP_START_TIME, 1)
+    peers = get_peer_pods()
+    peer_html = render_peer_table(peers)
     env_rows = ""
     for key in sorted(os.environ):
         if any(s in key.upper() for s in ["SECRET", "PASSWORD", "TOKEN", "KEY"]):
@@ -317,6 +437,7 @@ for i in $(seq 1 5); do
 done
   </pre>
 </div>
+{peer_html}
 <div class="card">
   <h2>Environment Variables</h2>
   <table>
