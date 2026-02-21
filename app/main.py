@@ -57,15 +57,45 @@ app = FastAPI(
 
 
 # ---------------------------------------------------------------------------
-# Peer discovery — list sibling pods via the Kubernetes API
+# Peer discovery — DNS-based (headless Service) + K8s API fallback
 # ---------------------------------------------------------------------------
+HEADLESS_SVC = os.getenv("HEADLESS_SVC", "demo-headless")
 SERVICE_NAME = os.getenv("SERVICE_NAME", "demo-service")
 
-def _fetch_peer_pods():
+
+def _discover_via_dns():
+    """
+    Resolve the headless Service DNS name to get all pod IPs.
+    No RBAC or API server access needed — just standard cluster DNS.
+    """
+    dns_name = f"{HEADLESS_SVC}.{NAMESPACE}.svc.cluster.local"
+    my_ip = socket.gethostbyname(socket.gethostname())
+    try:
+        results = socket.getaddrinfo(dns_name, 8000, socket.AF_INET, socket.SOCK_STREAM)
+        seen = set()
+        peers = []
+        for _, _, _, _, (ip, _) in results:
+            if ip in seen:
+                continue
+            seen.add(ip)
+            peers.append({
+                "name": ip,  # DNS only gives IPs, not pod names
+                "ip": ip,
+                "node": "—",
+                "phase": "Running",
+                "ready": True,  # only ready pods appear in DNS
+                "restarts": 0,
+                "is_self": ip == my_ip,
+            })
+        return sorted(peers, key=lambda p: p["ip"])
+    except socket.gaierror:
+        return []
+
+
+def _discover_via_k8s_api():
     """
     Query the Kubernetes API for all pods in this Deployment (blocking).
-    Called in a thread pool to avoid starving the uvicorn event loop.
-    Returns a list of dicts: [{name, ip, node, ready, is_self}, ...]
+    Returns richer data (pod names, node, restarts) but requires API server access.
     """
     if not K8S_AVAILABLE:
         return []
@@ -73,7 +103,7 @@ def _fetch_peer_pods():
         pods = k8s_v1.list_namespaced_pod(
             namespace=NAMESPACE,
             label_selector="app=demo",
-            _request_timeout=2,  # hard timeout on the API call
+            _request_timeout=2,
         )
         my_ip = socket.gethostbyname(socket.gethostname())
         peers = []
@@ -97,17 +127,25 @@ def _fetch_peer_pods():
             })
         return sorted(peers, key=lambda p: p["name"])
     except Exception as e:
-        logger.warning(f"Peer discovery failed: {e}")
+        logger.warning(f"K8s API peer discovery failed: {e}")
         return []
 
 
+def _fetch_peer_pods():
+    """Try K8s API first (richer data), fall back to DNS discovery."""
+    peers = _discover_via_k8s_api()
+    if peers:
+        return peers
+    return _discover_via_dns()
+
+
 async def get_peer_pods():
-    """Async wrapper — runs the blocking K8s API call in a thread with a timeout."""
+    """Async wrapper — runs discovery in a thread with a timeout."""
     try:
         loop = asyncio.get_event_loop()
         return await asyncio.wait_for(
             loop.run_in_executor(_k8s_executor, _fetch_peer_pods),
-            timeout=3.0,  # give up after 3s so we never block probes
+            timeout=3.0,
         )
     except (asyncio.TimeoutError, Exception) as e:
         logger.warning(f"Peer discovery timed out or failed: {e}")

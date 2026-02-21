@@ -1,0 +1,21 @@
+# Headless Service — for DNS-based peer pod discovery
+# ---------------------------------------------------
+# clusterIP: None means Kubernetes creates DNS A records
+# for each individual pod IP instead of a single virtual IP.
+# This lets pods discover their siblings via a simple DNS lookup —
+# no Kubernetes API access or RBAC needed.
+#
+# DNS name: demo-headless.fastapi-demo-troy.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-headless
+  namespace: fastapi-demo-troy
+spec:
+  clusterIP: None
+  selector:
+    app: demo
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
