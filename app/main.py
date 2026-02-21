@@ -351,7 +351,42 @@ async def toggle_health():
    "<p>✅ The liveness probe is passing again.</p>"}
 </div>
 <div class="card">
-  <h2>🔧 Watch It Happen</h2>
+  <h2>� What Just Happened</h2>
+  <p>This endpoint flips a Python variable (<code>HEALTHY</code>) <strong>in memory on this one pod</strong>.
+     The other replicas are unaffected — they're separate processes with their own state.</p>
+  <p><code>/healthz</code> starts returning <strong>503 immediately</strong> — there's no delay.
+     But Kubernetes won't act until the probe fails enough times:</p>
+  <table>
+    <tr><th>Time</th><th>What Happens</th></tr>
+    <tr><td>t=0</td><td>You hit <code>/toggle-health</code> → <code>HEALTHY = False</code></td></tr>
+    <tr><td>Next probe</td><td>K8s sends <code>GET /healthz</code> → 503 → failure #1</td></tr>
+    <tr><td>+10s</td><td>Next probe (<code>periodSeconds: 10</code>) → 503 → failure #2</td></tr>
+    <tr><td>+20s</td><td>Next probe → 503 → failure #3 = <code>failureThreshold</code> reached</td></tr>
+    <tr><td>+20-30s</td><td>K8s <strong>kills and restarts the container</strong> inside this pod</td></tr>
+  </table>
+</div>
+<div class="card">
+  <h2>🔄 Restart, Not Replace</h2>
+  <p>Kubernetes <strong>restarts the container inside the existing pod</strong> — it does NOT
+     delete the pod and create a new one. The pod name stays the same, but:</p>
+  <ul>
+    <li>The <code>RESTARTS</code> counter increments</li>
+    <li>The container process starts fresh → <code>HEALTHY</code> resets to <code>True</code></li>
+    <li>The pod recovers and passes probes again automatically</li>
+  </ul>
+  <p>New pods (replicas) are only created when the Deployment's <code>replicas</code> count changes,
+     or a pod is evicted/deleted entirely (node failure, <code>kubectl delete pod</code>).</p>
+</div>
+<div class="card">
+  <h2>⏱️ Worst-Case Timing</h2>
+  <p>With <code>periodSeconds: 10</code> and <code>failureThreshold: 3</code>:</p>
+  <ul>
+    <li><strong>Best case:</strong> ~20s (toggle right before a probe fires)</li>
+    <li><strong>Worst case:</strong> ~40s (toggle right after a probe just passed)</li>
+  </ul>
+</div>
+<div class="card">
+  <h2>�🔧 Watch It Happen</h2>
   <pre>
 # In another terminal, watch for the restart
 kubectl get pods -n {NAMESPACE} -w
@@ -389,13 +424,62 @@ async def toggle_ready():
    "<p>✅ The pod is ready and will receive traffic again.</p>"}
 </div>
 <div class="card">
+  <h2>� What Just Happened</h2>
+  <p>This endpoint flips a Python variable (<code>READY</code>) <strong>in memory on this one pod</strong>.
+     The other replicas are unaffected — they keep serving traffic normally.</p>
+  <p><code>/ready</code> starts returning <strong>503 immediately</strong>, but Kubernetes
+     needs to see enough consecutive failures before acting:</p>
+  <table>
+    <tr><th>Time</th><th>What Happens</th></tr>
+    <tr><td>t=0</td><td>You hit <code>/toggle-ready</code> → <code>READY = False</code></td></tr>
+    <tr><td>Next probe</td><td>K8s sends <code>GET /ready</code> → 503 → failure #1</td></tr>
+    <tr><td>+5s</td><td>Next probe (<code>periodSeconds: 5</code>) → 503 → failure #2 = <code>failureThreshold</code> reached</td></tr>
+    <tr><td>+5-10s</td><td>Pod is <strong>removed from Service endpoints</strong> — no traffic routed here</td></tr>
+  </table>
+</div>
+<div class="card">
+  <h2>🚫 Removed, Not Restarted</h2>
+  <p>Unlike liveness, readiness failure does <strong>NOT restart the container</strong>. The pod
+     keeps running — it's just taken out of the load balancer. This is the key difference:</p>
+  <table>
+    <tr><th>Probe</th><th>Failure Action</th><th>Pod Status</th></tr>
+    <tr><td><code>/healthz</code> (liveness)</td><td>Kill &amp; restart container</td><td>RESTARTS increments</td></tr>
+    <tr><td><code>/ready</code> (readiness)</td><td>Remove from Service endpoints</td><td>Shows <code>0/1 Ready</code>, keeps running</td></tr>
+  </table>
+  <p>This is intentional — readiness handles <strong>temporary</strong> issues (DB connection lost,
+     cache warming) where restarting wouldn't help. The pod stays alive and can recover on its own.</p>
+</div>
+<div class="card">
+  <h2>🔄 Recovery</h2>
+  <p>When you toggle readiness back on, the pod must pass <code>successThreshold: 2</code>
+     consecutive checks before Kubernetes adds it back to the Service endpoints.</p>
+  <table>
+    <tr><th>Time</th><th>What Happens</th></tr>
+    <tr><td>t=0</td><td>You hit <code>/toggle-ready</code> again → <code>READY = True</code></td></tr>
+    <tr><td>Next probe</td><td><code>GET /ready</code> → 200 → success #1</td></tr>
+    <tr><td>+5s</td><td>Next probe → 200 → success #2 = <code>successThreshold</code> reached</td></tr>
+    <tr><td>+5-10s</td><td>Pod is <strong>added back</strong> to Service endpoints — traffic resumes</td></tr>
+  </table>
+</div>
+<div class="card">
+  <h2>⏱️ Timing</h2>
+  <p>With <code>periodSeconds: 5</code> and <code>failureThreshold: 2</code>:</p>
+  <ul>
+    <li><strong>Removal:</strong> ~5-15s after toggling off</li>
+    <li><strong>Recovery:</strong> ~5-15s after toggling back on (needs 2 successes)</li>
+  </ul>
+</div>
+<div class="card">
   <h2>🔧 Watch It Happen</h2>
   <pre>
-# Watch endpoints change
+# Watch endpoints — the pod IP appears/disappears
 kubectl get endpoints demo-service -n {NAMESPACE} -w
 
-# See the pod go to 0/1 Ready
+# See the pod go to 0/1 Ready (still Running, not restarted)
 kubectl get pods -n {NAMESPACE} -w
+
+# Describe the pod to see readiness events
+kubectl describe pod {POD_NAME} -n {NAMESPACE} | tail -20
   </pre>
 </div>
 <p><a href="/toggle-ready">Toggle again</a> | <a href="/">Home</a></p>
