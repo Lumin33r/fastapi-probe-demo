@@ -1,0 +1,84 @@
+name: Build and Deploy to EKS
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+  DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+  AWS_REGION: "us-east-1"
+  K8S_NAMESPACE: "fastapi-demo-troy"
+  EKS_CLUSTER_NAME: "k8s-training-cluster"
+  IMAGE_NAME: "fastapi-probe-demo"
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+  eks_deploy:
+    needs: build_and_push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install AWS IAM Authenticator
+        run: |
+          curl -o aws-iam-authenticator https://amazon-eks.s3.us-west-2.amazonaws.com/1.21.2/2021-07-05/bin/linux/amd64/aws-iam-authenticator
+          chmod +x ./aws-iam-authenticator
+          mkdir -p $HOME/bin && mv ./aws-iam-authenticator $HOME/bin/aws-iam-authenticator
+          echo "$HOME/bin" >> $GITHUB_PATH
+        continue-on-error: true
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Ensure GHCR image pull secret exists
+        run: |
+          # This secret was created in the AM assignment, but we ensure it exists
+          kubectl create secret docker-registry registry-secrets \
+            --docker-server=ghcr.io \
+            --docker-username="${{ env.DOCKER_USERNAME }}" \
+            --docker-password="${{ env.DOCKER_PASSWORD }}" \
+            --docker-email="${{ env.DOCKER_USERNAME }}@users.noreply.github.com" \
+            -n ${{ env.K8S_NAMESPACE }} || echo "Secret already exists (from AM deployment)"
+
+      - name: Deploy to EKS
+        run: kubectl apply -f k8s -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Verify rollout
+        run: |
+          kubectl get deployments -n ${{ env.K8S_NAMESPACE }}
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }}
+          kubectl get svc -n ${{ env.K8S_NAMESPACE }}
