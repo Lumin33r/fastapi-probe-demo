@@ -15,8 +15,13 @@ import socket
 import time
 import datetime
 import logging
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger("uvicorn.error")
+
+# Thread pool for K8s API calls — prevents blocking the uvicorn event loop
+_k8s_executor = ThreadPoolExecutor(max_workers=1)
 
 # ---------------------------------------------------------------------------
 # Kubernetes API client — for peer pod discovery
@@ -56,11 +61,11 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 SERVICE_NAME = os.getenv("SERVICE_NAME", "demo-service")
 
-def get_peer_pods():
+def _fetch_peer_pods():
     """
-    Query the Kubernetes API for all pods in this Deployment.
+    Query the Kubernetes API for all pods in this Deployment (blocking).
+    Called in a thread pool to avoid starving the uvicorn event loop.
     Returns a list of dicts: [{name, ip, node, ready, is_self}, ...]
-    Falls back to an empty list if the K8s client isn't available.
     """
     if not K8S_AVAILABLE:
         return []
@@ -68,6 +73,7 @@ def get_peer_pods():
         pods = k8s_v1.list_namespaced_pod(
             namespace=NAMESPACE,
             label_selector="app=demo",
+            _request_timeout=2,  # hard timeout on the API call
         )
         my_ip = socket.gethostbyname(socket.gethostname())
         peers = []
@@ -92,6 +98,19 @@ def get_peer_pods():
         return sorted(peers, key=lambda p: p["name"])
     except Exception as e:
         logger.warning(f"Peer discovery failed: {e}")
+        return []
+
+
+async def get_peer_pods():
+    """Async wrapper — runs the blocking K8s API call in a thread with a timeout."""
+    try:
+        loop = asyncio.get_event_loop()
+        return await asyncio.wait_for(
+            loop.run_in_executor(_k8s_executor, _fetch_peer_pods),
+            timeout=3.0,  # give up after 3s so we never block probes
+        )
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.warning(f"Peer discovery timed out or failed: {e}")
         return []
 
 
@@ -324,7 +343,7 @@ async def startup():
 async def index():
     """Landing page with navigation and educational overview."""
     uptime = round(time.time() - APP_START_TIME, 1)
-    peers = get_peer_pods()
+    peers = await get_peer_pods()
     peer_html = render_peer_table(peers)
     return HTMLResponse(content=f"""
 {STYLE}
@@ -397,7 +416,7 @@ kubectl port-forward pod/{POD_NAME} -n {NAMESPACE} 8080:8000
 async def info():
     """Detailed pod metadata and environment information."""
     uptime = round(time.time() - APP_START_TIME, 1)
-    peers = get_peer_pods()
+    peers = await get_peer_pods()
     peer_html = render_peer_table(peers)
     env_rows = ""
     for key in sorted(os.environ):
