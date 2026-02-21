@@ -1,0 +1,5 @@
+# Namespace — isolates all demo resources
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fastapi-demo-troy

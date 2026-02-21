@@ -1,0 +1,19 @@
+# NodePort Service — exposes the app on each node's IP
+# Use this if you want to access the demo from outside
+# the cluster without an Ingress or LoadBalancer.
+#
+# Access via: http://<node-ip>:<nodePort>
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-nodeport
+  namespace: fastapi-demo-troy
+spec:
+  selector:
+    app: demo
+  ports:
+    - port: 80
+      targetPort: 8000
+      nodePort: 30080
+      protocol: TCP
+  type: NodePort

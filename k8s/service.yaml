@@ -1,0 +1,16 @@
+# ClusterIP Service — internal load balancer across demo pods
+# Students can observe endpoints appearing/disappearing
+# as readiness probes pass/fail on individual pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-service
+  namespace: fastapi-demo-troy
+spec:
+  selector:
+    app: demo
+  ports:
+    - port: 80
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP

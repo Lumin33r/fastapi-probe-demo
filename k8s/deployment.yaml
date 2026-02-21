@@ -1,0 +1,87 @@
+# Deployment with all three probe types configured
+# ------------------------------------------------
+# - startupProbe:  waits for app init (blocks liveness/readiness)
+# - livenessProbe: restarts container if /healthz fails
+# - readinessProbe: removes pod from Service if /ready fails
+#
+# 3 replicas so students can observe load balancing and
+# per-pod health toggling.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo
+  namespace: fastapi-demo-troy
+  labels:
+    app: demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: demo
+  template:
+    metadata:
+      labels:
+        app: demo
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+        - name: fastapi
+          image: ghcr.io/lumin33r/fastapi-probe-demo:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: APP_VERSION
+              value: "1.0.0"
+            - name: STARTUP_DELAY
+              value: "8" # Readiness won't pass for 8 seconds — watch endpoints!
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+
+          # ── Startup Probe ──────────────────────────────
+          # Runs first. Liveness & readiness are DISABLED until this passes.
+          # Max window: 2 + (10 × 3) = 32 seconds
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: 8000
+            initialDelaySeconds: 2
+            periodSeconds: 3
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 10
+
+          # ── Liveness Probe ─────────────────────────────
+          # Runs after startup passes. Failure → container restart.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 0 # startup probe handles the delay
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # ── Readiness Probe ────────────────────────────
+          # Runs after startup passes. Failure → removed from Service endpoints.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 2
+            failureThreshold: 2
