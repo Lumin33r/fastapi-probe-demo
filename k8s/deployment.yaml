@@ -28,6 +28,7 @@ spec:
       containers:
         - name: fastapi
           image: ghcr.io/lumin33r/fastapi-probe-demo:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8000
           env:
